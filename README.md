@@ -14,4 +14,4 @@ That way, you can spread the load (and the amount of open connections).
 Missing:
 - SSL Support
 - Testing
-- A better publisher and subscriber class
+- Better publisher and subscriber classes
