@@ -133,7 +133,7 @@ class PubProtocol(basic.LineReceiver):
             if data["command"] == "list":
                 self.sendLine(self.serializer.dumps(self.factory.clients.keys()))
             if data["command"] == "subscribed":
-                self.sendLine(self.serializer.dumps(data["args"]['uid'] in self.factory.clients))
+                self.sendLine(self.serializer.dumps({data["args"]['uid']: (data["args"]['uid'] in self.factory.clients)}))
         else:
             log.warn("{line!r}", line=raw_line)
 

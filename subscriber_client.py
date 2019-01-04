@@ -6,7 +6,7 @@ import json
 
 
 class Subscriber(asyncore.dispatcher):
-    def __init__(self, host, port, uids, callback, close_callback=None):
+    def __init__(self, host, port, uids, callback, serializer=json, close_callback=None):
         asyncore.dispatcher.__init__(self)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.connect((host, port))
@@ -16,10 +16,11 @@ class Subscriber(asyncore.dispatcher):
         self.registered = False
         self.callback = callback
         self.close_callback = close_callback
+        self.serializer = serializer
 
     def handle_connect(self):
         if not self.registered:
-            d = json.dumps({"uids": self.uids})
+            d = self.serializer.dumps({"uids": self.uids})
             self.send(d + "\r\n")
             self.registered = True
 
@@ -31,12 +32,12 @@ class Subscriber(asyncore.dispatcher):
 
     def handle_read(self):
         x = self.recv(8192)
-        data = json.loads(x.strip())
+        data = self.serializer.loads(x.strip())
         if data:
             self.callback(x)
         ack = {'ack': 1, 'uid_conversation':data['uid_conversation']}
         print ack
-        self.send(json.dumps(ack) + "\r\n")
+        self.send(self.serializer.dumps(ack) + "\r\n")
 
     def writable(self):
         return not self.registered
@@ -46,7 +47,7 @@ class Subscriber(asyncore.dispatcher):
         self.registered = False
 
     def handle_write(self):
-        d = json.dumps({"uids": self.uids})
+        d = self.serializer.dumps({"uids": self.uids})
         x = self.send(d + "\r\n")
         if x:
             self.registered = True
@@ -61,5 +62,5 @@ if __name__ == '__main__':
         print("Closing")
         raise asyncore.ExitNow("BYE")
 
-    client = Subscriber("127.0.0.1", 1026, ["test1"], func, func2)
+    client = Subscriber("127.0.0.1", 1026, ["test1"], func, close_callback=func2)
     asyncore.loop()
