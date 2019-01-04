@@ -44,7 +44,7 @@ class PubProtocol(basic.LineReceiver):
 
     def __init__(self, factory):
         self.factory = factory
-        self.uids = []
+        self.uids = set()
         self.ident = str(uuid.uuid4())
 
 
@@ -66,11 +66,12 @@ class PubProtocol(basic.LineReceiver):
 
     def no_ack_timeout(self, uid_conversation, uid_to):
         if uid_conversation in self.factory.waiting_acks:
-            log.warn('No ack for %s' % (uid_conversation,))
+            log.warn('No ack for %s to %s' % (uid_conversation,uid_to))
             data = {'ack':0, 'error': 'time out, unable to contact'}
             self.sendLine(json.dumps(data))
             clients = self.factory.waiting_acks[uid_conversation]["clients"]
             for client in clients:
+                log.warn('UIDS for this client: %s' % client.uids)
                 if len(client.uids) == 1:
                     try:
                         log.warn('Aborting connection because the only uid it had is not responding %s' % (uid_conversation,))
@@ -78,7 +79,6 @@ class PubProtocol(basic.LineReceiver):
                     except Exception, e:
                         log.failure("{message!r}", message=e.message)
                 client.uids.remove(uid_to)
-            self.factory.uids.remove(uid_to)
             del self.factory.clients[uid_to]
         else:
             log.warn('Callback called but should have not been for conversation %s' % (uid_conversation,))
@@ -107,6 +107,8 @@ class PubProtocol(basic.LineReceiver):
             if "ack" in data:
                 if data["ack"] == 1:
                     self.process_ack(data["uid_conversation"])
+                else:
+                    log.info("Un-ack received: {message!r}", message=line.rstrip() )
             if "to" in data:
                 uid_to = data["to"]
                 clients = self.factory.clients.get(uid_to)
@@ -127,7 +129,7 @@ class PubProtocol(basic.LineReceiver):
 
             elif "uids" in data:
                     self._clean_uids()
-                    self.uids = data["uids"]
+                    self.uids = set(data["uids"])
                     for each in self.uids:
                         self.factory.clients[each].add(self)
             elif "command" in data:

@@ -16,7 +16,6 @@ except:
         selectreactor.install()
 
 from pubsub import PubProtocol
-from suscriber_client import Subscriber
 from twisted.internet import reactor, protocol, endpoints
 from twisted.protocols import basic
 from twisted.internet.protocol import ReconnectingClientFactory
@@ -45,6 +44,8 @@ class BrokerPubProtocol(PubProtocol):
             if 'ack' in data:
                 if data["ack"] == 1:
                     self.factory.process_ack(data["uid_conversation"])
+                else:
+                    log.info("Un-ack received: {message!r}", message=line.rstrip() )
             elif "uids" in data:
                 self._clean_uids()
                 self.uids = set(data["uids"])
@@ -124,11 +125,12 @@ class BrokerPubFactory(protocol.Factory):
 
     def no_ack_timeout(self, uid_conversation, uid_to):
         if uid_conversation in self.waiting_acks:
-            log.warn('No ack for %s' % (uid_conversation,))
+            log.warn('No ack for %s to %s' % (uid_conversation,uid_to))
             data = {'ack': 0, 'error': 'time out, unable to contact'}
             self.subscriber.sendLine(json.dumps(data))
             clients = self.waiting_acks[uid_conversation]['clients']
             for client in clients:
+                log.warn('broker UIDS for this client: %s' % client.uids)
                 if len(client.uids) == 1:
                     try:
                         log.warn('Aborting connection because the only uid it had is not responding %s' % (uid_conversation,))

@@ -59,12 +59,12 @@ if __name__ == '__main__':
 
     pc = PublisherClient("127.0.0.1", 1025)
     print pc.subscribed("test1")
-    print pc.subscribed("caca")
-    pc.publish("test")
-    time.sleep(2)
+    #print pc.subscribed("caca")
+    #pc.publish("test")
+    #time.sleep(2)
     pc.publish("test1")
-    time.sleep(2)
-    pc.publish("4")
-    print pc
+    #time.sleep(2)
+    pc.publish("85015eca-29ff-4699-abc9-3b4991f76cc8")
+    #print pc
     print pc.list()
 
