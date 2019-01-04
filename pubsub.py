@@ -61,24 +61,40 @@ class PubProtocol(basic.LineReceiver):
                     if len(self.factory.clients[each]) == 0:
                         del self.factory.clients[each]
 
-    def no_ack_timeout(self, uid_conversation):
+
+
+
+    def no_ack_timeout(self, uid_conversation, uid_to):
         if uid_conversation in self.factory.waiting_acks:
             log.warn('No ack for %s' % (uid_conversation,))
             data = {'ack':0, 'error': 'time out, unable to contact'}
             self.sendLine(json.dumps(data))
-            clients = self.factory.waiting_acks[uid_conversation]
+            clients = self.factory.waiting_acks[uid_conversation]["clients"]
             for client in clients:
-                try:
-                    client.transport.abortConnection()
-                except Exception, e:
-                    log.error("{message!r}", message=e.message)
+                if len(client.uids) == 1:
+                    try:
+                        log.warn('Aborting connection because the only uid it had is not responding %s' % (uid_conversation,))
+                        client.transport.abortConnection()
+                    except Exception, e:
+                        log.failure("{message!r}", message=e.message)
+                client.uids.remove(uid_to)
+            self.factory.uids.remove(uid_to)
+            del self.factory.clients[uid_to]
+        else:
+            log.warn('Callback called but should have not been for conversation %s' % (uid_conversation,))
 
     def process_ack(self, uid_conversation, ack = 1):
         if uid_conversation in self.factory.waiting_acks:
-            data = {'ack':ack}
+            log.debug('Processing ack for conversation %s' % (uid_conversation,))
+            data = {'ack':ack, 'uid_conversation':uid_conversation}
             channel = self.factory.waiting_acks[uid_conversation]["channel"]
             channel.sendLine(json.dumps(data))
             del self.factory.waiting_acks[uid_conversation]
+            if uid_conversation in self.factory.conversation_callbacks:
+                self.factory.conversation_callbacks[uid_conversation].cancel()
+                del self.factory.conversation_callbacks[uid_conversation]
+        else:
+            log.warn('Tried to process an ack that is not present %s' % (uid_conversation,))
 
     def send_uid_no_registered(self):
         data = {'ack': 0, 'error': 'uid not registered'}
@@ -102,9 +118,10 @@ class PubProtocol(basic.LineReceiver):
                             try:
                                 client.sendLine(data)
                             except Exception, e:
-                                log.error("{message!r}", message=e.message)
+                                log.failure("{message!r}", message=e.message)
                                 client.transport.loseConnection()
-                        reactor.callLater(2, self.no_ack_timeout, uid_conversation)
+                        callback = reactor.callLater(1.7, self.no_ack_timeout, uid_conversation, uid_to)
+                        self.factory.conversation_callbacks[uid_conversation] = callback
                 else:
                     self.send_uid_no_registered()
 
@@ -122,7 +139,7 @@ class PubProtocol(basic.LineReceiver):
                 log.warn("{line!r}", line=line)
 
         except Exception, e:
-            log.error("{message!r}", message=e.message)
+            log.failure("{message!r}", message=e.message)
             log.error("{line!r}", line=line)
 
 
@@ -133,6 +150,7 @@ class PubFactory(protocol.Factory):
     def __init__(self):
         self.clients = defaultdict(lambda: set())
         self.waiting_acks = {}
+        self.conversation_callbacks = {}
 
     def buildProtocol(self, addr):
         return PubProtocol(self)

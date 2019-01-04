@@ -33,7 +33,7 @@ log = Logger(observer=textFileLogObserver(logfile))
 class BrokerPubProtocol(PubProtocol):
     def __init__(self, factory):
         self.factory = factory
-        self.uids = []
+        self.uids =set()
 
     def connectionLost(self, reason):
         self._clean_uids()
@@ -44,16 +44,16 @@ class BrokerPubProtocol(PubProtocol):
             data = json.loads(line.rstrip())
             if 'ack' in data:
                 if data["ack"] == 1:
-                    self.process_ack(data["uid_conversation"])
+                    self.factory.process_ack(data["uid_conversation"])
             elif "uids" in data:
                 self._clean_uids()
-                self.uids = data["uids"]
+                self.uids = set(data["uids"])
                 for each in self.uids:
                     self.factory.clients[each].add(self)
                 self.factory.refresh_uids()
 
         except Exception, e:
-            log.error(e.message)
+            log.failure(e.message)
 
 
 from collections import defaultdict
@@ -63,7 +63,7 @@ from twisted.internet.endpoints import TCP4ClientEndpoint
 class BrokerPubFactory(protocol.Factory):
     def __init__(self, ip, port):
         self.clients = defaultdict(lambda: set())
-        self.uids = []
+        self.uids = set()
         self.subscriber = None
         self.thread = None
         self.ip = ip
@@ -73,12 +73,10 @@ class BrokerPubFactory(protocol.Factory):
         self.secs_to_wait = 0.5
         self.suscribe()
         self.waiting_acks = {}
+        self.conversation_callbacks = {}
 
     def refresh_uids(self):
-        uids = set()
-        for uid in self.clients.keys():
-            uids.add(uid)
-        self.uids = list(uids)
+        self.uids = set(self.clients.keys())
         if self.subscriber is None:
             self.suscribe()
         else:
@@ -112,22 +110,37 @@ class BrokerPubFactory(protocol.Factory):
         self.subscriber.sendLine(json.dumps(data))
 
     def process_ack(self, uid_conversation, ack = 1):
-        if uid_conversation in self.factory.waiting_acks:
-            data = {'ack':ack, 'uid_conversation':uid_conversation}
-            channel = self.factory.waiting_acks[uid_conversation]["channel"]
-            channel.sendLine(json.dumps(data))
-            del self.factory.waiting_acks[uid_conversation]
-
-    def no_ack_timeout(self, uid_conversation):
         if uid_conversation in self.waiting_acks:
+            log.debug('Processing ack for conversation %s' % (uid_conversation,))
+            data = {'ack':ack, 'uid_conversation':uid_conversation}
+            channel = self.waiting_acks[uid_conversation]["channel"]
+            channel.sendLine(json.dumps(data))
+            del self.waiting_acks[uid_conversation]
+            if uid_conversation in self.conversation_callbacks:
+                self.conversation_callbacks[uid_conversation].cancel()
+                del self.conversation_callbacks[uid_conversation]
+        else:
+            log.warn('Tried to process an ack that is not present %s' % (uid_conversation,))
+
+    def no_ack_timeout(self, uid_conversation, uid_to):
+        if uid_conversation in self.waiting_acks:
+            log.warn('No ack for %s' % (uid_conversation,))
             data = {'ack': 0, 'error': 'time out, unable to contact'}
             self.subscriber.sendLine(json.dumps(data))
-            clients = self.factory.waiting_acks[uid_conversation]
+            clients = self.waiting_acks[uid_conversation]['clients']
             for client in clients:
-                try:
-                    client.transport.abortConnection()
-                except Exception, e:
-                    log.error("{message!r}", message=e.message)
+                if len(client.uids) == 1:
+                    try:
+                        log.warn('Aborting connection because the only uid it had is not responding %s' % (uid_conversation,))
+                        client.transport.abortConnection()
+                    except Exception, e:
+                        log.failure("ERROR in no_ack_timeout:{message!r}", message=e.message)
+                client.uids.remove(uid_to)
+            self.uids.remove(uid_to)
+            del self.clients[uid_to]
+        else:
+            log.warn('Callback called but should have not been for conversation %s' % (uid_conversation,))
+
 
     def new_message(self, data):
         if "uid_to" in data:
@@ -139,11 +152,13 @@ class BrokerPubFactory(protocol.Factory):
                 data = json.dumps({'uid_to': uid_to, 'uid_conversation': uid_conversation})
                 for client in clients:
                     try:
+                        log.debug('Going to send message for uid %s in conversation %s' % (uid_to, uid_conversation,))
                         client.sendLine(data)
                     except Exception, e:
-                        log.error("{message!r}", message=e.message)
+                        log.failure("ERROR in new_message: {message!r}", message=e.message)
                         client.transport.loseConnection()
-                reactor.callLater(1.7, self.no_ack_timeout, uid_conversation)
+                callback = reactor.callLater(1.7, self.no_ack_timeout, uid_conversation, uid_to)
+                self.conversation_callbacks[uid_conversation] = callback
             else:
                 self.send_uid_no_registered()
 
@@ -174,7 +189,7 @@ class Subscriber(basic.LineReceiver):
         self.register()
 
     def register(self):
-        d = json.dumps({"uids": self.uids})
+        d = json.dumps({"uids": list(self.uids)})
         x = self.sendLine(d)
         if x:
             self.registered = True

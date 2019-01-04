@@ -1,5 +1,7 @@
 import json
 import socket
+import select
+
 
 
 class PublisherClient(object):
@@ -15,7 +17,13 @@ class PublisherClient(object):
             s.connect((self.host, self.port))
             x = s.send(data + "\r\n")
             if x:
+                s.setblocking(0)
+                ready = select.select([s], [], [], 3)
+                if ready[0]:
+                    data = s.recv(4096)
+                    print data
                 return True
+
         except Exception, e:
             print(e)
         return False
