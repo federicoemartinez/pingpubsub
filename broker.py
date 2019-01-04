@@ -30,39 +30,39 @@ log = Logger(observer=textFileLogObserver(logfile))
 
 
 class BrokerPubProtocol(PubProtocol):
-    def __init__(self, factory):
+    def __init__(self, factory, serializer=json):
         self.factory = factory
         self.uids =set()
+        self.serializer = json
 
     def connectionLost(self, reason):
         self._clean_uids()
         self.factory.refresh_uids()
 
+    def _unsupported_messages(self):
+        return ("to", "command", )
+
+    def process_new_subscription(self):
+        self.factory.refresh_uids()
+
     def lineReceived(self, line):
         try:
-            data = json.loads(line.rstrip())
-            if 'ack' in data:
-                if data["ack"] == 1:
-                    self.factory.process_ack(data["uid_conversation"])
-                else:
-                    log.info("Un-ack received: {message!r}", message=line.rstrip() )
-            elif "uids" in data:
-                self._clean_uids()
-                self.uids = set(data["uids"])
-                for each in self.uids:
-                    self.factory.clients[each].add(self)
-                self.factory.refresh_uids()
-
+            data = self.serializer.loads(line.rstrip())
+            for each in self._unsupported_messages():
+                if each in data:
+                    log.error("Unsupported message {message!r}", message = line.rstrip())
+                    self.transport.abortConnection()
+            self.process_line_data(data, line)
         except Exception, e:
             log.failure(e.message)
-
+            self.transport.abortConnection()
 
 from collections import defaultdict
 from twisted.internet.endpoints import TCP4ClientEndpoint
 
 
 class BrokerPubFactory(protocol.Factory):
-    def __init__(self, ip, port):
+    def __init__(self, ip, port, serializer=json):
         self.clients = defaultdict(lambda: set())
         self.uids = set()
         self.subscriber = None
@@ -70,11 +70,12 @@ class BrokerPubFactory(protocol.Factory):
         self.ip = ip
         self.port = port
         self.defer = None
-        self.subfactory = SubscriberClientFactory(self)
+        self.subfactory = SubscriberClientFactory(self, serializer)
         self.secs_to_wait = 0.5
         self.suscribe()
         self.waiting_acks = {}
         self.conversation_callbacks = {}
+        self.serializer = serializer
 
     def refresh_uids(self):
         self.uids = set(self.clients.keys())
@@ -108,41 +109,7 @@ class BrokerPubFactory(protocol.Factory):
 
     def send_uid_no_registered(self):
         data = {'ack': 0, 'error': 'uid not registered'}
-        self.subscriber.sendLine(json.dumps(data))
-
-    def process_ack(self, uid_conversation, ack = 1):
-        if uid_conversation in self.waiting_acks:
-            log.debug('Processing ack for conversation %s' % (uid_conversation,))
-            data = {'ack':ack, 'uid_conversation':uid_conversation}
-            channel = self.waiting_acks[uid_conversation]["channel"]
-            channel.sendLine(json.dumps(data))
-            del self.waiting_acks[uid_conversation]
-            if uid_conversation in self.conversation_callbacks:
-                self.conversation_callbacks[uid_conversation].cancel()
-                del self.conversation_callbacks[uid_conversation]
-        else:
-            log.warn('Tried to process an ack that is not present %s' % (uid_conversation,))
-
-    def no_ack_timeout(self, uid_conversation, uid_to):
-        if uid_conversation in self.waiting_acks:
-            log.warn('No ack for %s to %s' % (uid_conversation,uid_to))
-            data = {'ack': 0, 'error': 'time out, unable to contact'}
-            self.subscriber.sendLine(json.dumps(data))
-            clients = self.waiting_acks[uid_conversation]['clients']
-            for client in clients:
-                log.warn('broker UIDS for this client: %s' % client.uids)
-                if len(client.uids) == 1:
-                    try:
-                        log.warn('Aborting connection because the only uid it had is not responding %s' % (uid_conversation,))
-                        client.transport.abortConnection()
-                    except Exception, e:
-                        log.failure("ERROR in no_ack_timeout:{message!r}", message=e.message)
-                client.uids.remove(uid_to)
-            self.uids.remove(uid_to)
-            del self.clients[uid_to]
-        else:
-            log.warn('Callback called but should have not been for conversation %s' % (uid_conversation,))
-
+        self.subscriber.sendLine(self.serializer.dumps(data))
 
     def new_message(self, data):
         if "uid_to" in data:
@@ -151,7 +118,7 @@ class BrokerPubFactory(protocol.Factory):
             uid_conversation = data['uid_conversation']
             if clients:
                 self.waiting_acks[uid_conversation] = {"clients": clients, "channel": self.subscriber}
-                data = json.dumps({'uid_to': uid_to, 'uid_conversation': uid_conversation})
+                data = self.serializer.dumps({'uid_to': uid_to, 'uid_conversation': uid_conversation})
                 for client in clients:
                     try:
                         log.debug('Going to send message for uid %s in conversation %s' % (uid_to, uid_conversation,))
@@ -159,7 +126,7 @@ class BrokerPubFactory(protocol.Factory):
                     except Exception, e:
                         log.failure("ERROR in new_message: {message!r}", message=e.message)
                         client.transport.loseConnection()
-                callback = reactor.callLater(1.7, self.no_ack_timeout, uid_conversation, uid_to)
+                callback = reactor.callLater(1.7, BrokerPubProtocol.no_ack_timeout, self, self.subscriber, uid_conversation, uid_to)
                 self.conversation_callbacks[uid_conversation] = callback
             else:
                 self.send_uid_no_registered()
@@ -176,13 +143,14 @@ class BrokerPubFactory(protocol.Factory):
 
 
 class Subscriber(basic.LineReceiver):
-    def __init__(self, broker):
+    def __init__(self, broker, serializer):
         self.broker = broker
         self.uids = []
         self.registered = False
+        self.serializer = serializer
 
     def lineReceived(self, line):
-        data = json.loads(line.rstrip())
+        data = self.serializer.loads(line.rstrip())
         self.broker.new_message(data)
 
     def set_uids(self, uids):
@@ -191,7 +159,7 @@ class Subscriber(basic.LineReceiver):
         self.register()
 
     def register(self):
-        d = json.dumps({"uids": list(self.uids)})
+        d = self.serializer.dumps({"uids": list(self.uids)})
         x = self.sendLine(d)
         if x:
             self.registered = True
@@ -201,11 +169,12 @@ class Subscriber(basic.LineReceiver):
 
 
 class SubscriberClientFactory(ReconnectingClientFactory):
-    def __init__(self, broker):
+    def __init__(self, broker, serializer=json):
         self.broker = broker
+        self.serializer = serializer
 
     def buildProtocol(self, addr):
-        s = Subscriber(self.broker)
+        s = Subscriber(self.broker, self.serializer)
         s.factory = self
         return s
 

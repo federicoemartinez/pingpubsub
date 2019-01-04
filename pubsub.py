@@ -42,12 +42,10 @@ import json
 
 class PubProtocol(basic.LineReceiver):
 
-    def __init__(self, factory):
+    def __init__(self, factory, serializer):
         self.factory = factory
         self.uids = set()
-        self.ident = str(uuid.uuid4())
-
-
+        self.serializer = serializer
 
 
     def connectionLost(self, reason):
@@ -61,15 +59,13 @@ class PubProtocol(basic.LineReceiver):
                     if len(self.factory.clients[each]) == 0:
                         del self.factory.clients[each]
 
-
-
-
-    def no_ack_timeout(self, uid_conversation, uid_to):
-        if uid_conversation in self.factory.waiting_acks:
+    @classmethod
+    def no_ack_timeout(cls, factory, channel, uid_conversation, uid_to):
+        if uid_conversation in factory.waiting_acks:
             log.warn('No ack for %s to %s' % (uid_conversation,uid_to))
             data = {'ack':0, 'error': 'time out, unable to contact'}
-            self.sendLine(json.dumps(data))
-            clients = self.factory.waiting_acks[uid_conversation]["clients"]
+            channel.sendLine(factory.serializer.dumps(data))
+            clients = factory.waiting_acks[uid_conversation]["clients"]
             for client in clients:
                 log.warn('UIDS for this client: %s' % client.uids)
                 if len(client.uids) == 1:
@@ -79,7 +75,7 @@ class PubProtocol(basic.LineReceiver):
                     except Exception, e:
                         log.failure("{message!r}", message=e.message)
                 client.uids.remove(uid_to)
-            del self.factory.clients[uid_to]
+            del factory.clients[uid_to]
         else:
             log.warn('Callback called but should have not been for conversation %s' % (uid_conversation,))
 
@@ -88,7 +84,7 @@ class PubProtocol(basic.LineReceiver):
             log.debug('Processing ack for conversation %s' % (uid_conversation,))
             data = {'ack':ack, 'uid_conversation':uid_conversation}
             channel = self.factory.waiting_acks[uid_conversation]["channel"]
-            channel.sendLine(json.dumps(data))
+            channel.sendLine(self.serializer.dumps(data))
             del self.factory.waiting_acks[uid_conversation]
             if uid_conversation in self.factory.conversation_callbacks:
                 self.factory.conversation_callbacks[uid_conversation].cancel()
@@ -98,47 +94,55 @@ class PubProtocol(basic.LineReceiver):
 
     def send_uid_no_registered(self):
         data = {'ack': 0, 'error': 'uid not registered'}
-        self.sendLine(json.dumps(data))
+        self.sendLine(self.serializer.dumps(data))
+
+    def process_new_subscription(self):
+        pass
+
+    def process_line_data(self,data, raw_line):
+        if "ack" in data:
+                if data["ack"] == 1:
+                    self.process_ack(data["uid_conversation"])
+                else:
+                    log.info("Un-ack received: {message!r}", message=raw_line.rstrip() )
+        if "to" in data:
+            uid_to = data["to"]
+            clients = self.factory.clients.get(uid_to)
+            if clients:
+                    uid_conversation = str(uuid.uuid4())
+                    self.factory.waiting_acks[uid_conversation] = {"clients":clients, "channel":self}
+                    data = self.serializer.dumps({'uid_to': uid_to, 'uid_conversation':uid_conversation})
+                    for client in clients:
+                        try:
+                            client.sendLine(data)
+                        except Exception, e:
+                            log.failure("{message!r}", message=e.message)
+                            client.transport.loseConnection()
+                    callback = reactor.callLater(1.7, PubProtocol.no_ack_timeout, self.factory, self, uid_conversation, uid_to)
+                    self.factory.conversation_callbacks[uid_conversation] = callback
+            else:
+                self.send_uid_no_registered()
+
+        elif "uids" in data:
+                self._clean_uids()
+                self.uids = set(data["uids"])
+                for each in self.uids:
+                    self.factory.clients[each].add(self)
+                self.process_new_subscription()
+        elif "command" in data:
+            if data["command"] == "list":
+                self.sendLine(self.serializer.dumps(self.factory.clients.keys()))
+            if data["command"] == "subscribed":
+                self.sendLine(self.serializer.dumps(data["args"]['uid'] in self.factory.clients))
+        else:
+            log.warn("{line!r}", line=raw_line)
+
 
     def lineReceived(self, line):
         log.debug("{line!r}", line=line)
         try:
-            data = json.loads(line.rstrip())
-            if "ack" in data:
-                if data["ack"] == 1:
-                    self.process_ack(data["uid_conversation"])
-                else:
-                    log.info("Un-ack received: {message!r}", message=line.rstrip() )
-            if "to" in data:
-                uid_to = data["to"]
-                clients = self.factory.clients.get(uid_to)
-                if clients:
-                        uid_conversation = str(uuid.uuid4())
-                        self.factory.waiting_acks[uid_conversation] = {"clients":clients, "channel":self}
-                        data = json.dumps({'uid_to': uid_to, 'uid_conversation':uid_conversation})
-                        for client in clients:
-                            try:
-                                client.sendLine(data)
-                            except Exception, e:
-                                log.failure("{message!r}", message=e.message)
-                                client.transport.loseConnection()
-                        callback = reactor.callLater(1.7, self.no_ack_timeout, uid_conversation, uid_to)
-                        self.factory.conversation_callbacks[uid_conversation] = callback
-                else:
-                    self.send_uid_no_registered()
-
-            elif "uids" in data:
-                    self._clean_uids()
-                    self.uids = set(data["uids"])
-                    for each in self.uids:
-                        self.factory.clients[each].add(self)
-            elif "command" in data:
-                if data["command"] == "list":
-                    self.sendLine(json.dumps(self.factory.clients.keys()))
-                if data["command"] == "subscribed":
-                    self.sendLine(json.dumps(data["args"]['uid'] in self.factory.clients))
-            else:
-                log.warn("{line!r}", line=line)
+            data = self.serializer.loads(line.rstrip())
+            self.process_line_data(data, line)
 
         except Exception, e:
             log.failure("{message!r}", message=e.message)
@@ -149,13 +153,14 @@ from collections import defaultdict
 
 
 class PubFactory(protocol.Factory):
-    def __init__(self):
+    def __init__(self, serializer=json):
         self.clients = defaultdict(lambda: set())
         self.waiting_acks = {}
         self.conversation_callbacks = {}
+        self.serializer = serializer
 
     def buildProtocol(self, addr):
-        return PubProtocol(self)
+        return PubProtocol(self, self.serializer)
 
 
 if __name__ == '__main__':
