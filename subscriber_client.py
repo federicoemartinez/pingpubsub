@@ -1,26 +1,26 @@
 __author__ = 'Fede M'
 
-
-import asyncore, socket
+import asyncore
+import socket
 import json
 
-class Subscriber(asyncore.dispatcher):
 
-    def __init__(self, host, port, uid, callback, close_callback=None):
+class Subscriber(asyncore.dispatcher):
+    def __init__(self, host, port, uids, callback, close_callback=None):
         asyncore.dispatcher.__init__(self)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.connect( (host, port) )
+        self.connect((host, port))
         self.port = port
         self.host = host
-        self.uid = uid
+        self.uids = uids
         self.registered = False
         self.callback = callback
         self.close_callback = close_callback
 
     def handle_connect(self):
         if not self.registered:
-            d = json.dumps({"uid":self.uid})
-            self.send(d+"\r\n")
+            d = json.dumps({"uids": self.uids})
+            self.send(d + "\r\n")
             self.registered = True
 
     def handle_close(self):
@@ -31,28 +31,35 @@ class Subscriber(asyncore.dispatcher):
 
     def handle_read(self):
         x = self.recv(8192)
-        if x:
-            print(x)
-            self.callback()
+        data = json.loads(x.strip())
+        if data:
+            self.callback(x)
+        ack = {'ack': 1, 'uid_conversation':data['uid_conversation']}
+        print ack
+        self.send(json.dumps(ack) + "\r\n")
 
     def writable(self):
         return not self.registered
 
+    def set_uids(self, uids):
+        self.uids = uids
+        self.registered = False
+
     def handle_write(self):
-        if not self.registered:
-            d = json.dumps({"uid":self.uid})
-            x = self.send(d+"\r\n")
-            if x:
-                self.registered = True
+        d = json.dumps({"uids": self.uids})
+        x = self.send(d + "\r\n")
+        if x:
+            self.registered = True
 
 
 if __name__ == '__main__':
-
-    def func():
-       print("I was called")
+    def func(x):
+        print("I was called")
+        print x
 
     def func2():
         print("Closing")
+        raise asyncore.ExitNow("BYE")
 
-    client = Subscriber("127.0.0.1", 1025, "test", func, func2)
+    client = Subscriber("127.0.0.1", 1026, ["test1"], func, func2)
     asyncore.loop()
